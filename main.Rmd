@@ -1,0 +1,168 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+library(tidyverse)
+library(gganimate)
+library(knitr)
+f1 = readRDS(file="data/f1_2018.rds")
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+```{r}
+# function that sets NA value to drivers have not finished the race
+set_NA_if_not_finished <- function(position, status){
+  # boolean scalar showing whether the driver has finished
+  has_finished = grepl("\\+* Lap|Finished", status)
+
+  # if not finished, set NA  
+  if (has_finished == TRUE) {
+    position
+  }
+  else {
+    NA_integer_
+  }
+}
+
+# extract important values from the nested lists
+f1_df = 
+  tibble(x = f1$MRData$RaceTable$Races) %>%
+  hoist(x,
+        name = "raceName",
+        round = "round",
+        date = "date",
+        results = "Results") %>%
+  select(-x) %>% 
+  unnest_longer(results) %>%
+  hoist(results,
+        first_name = list("Driver", "givenName"),
+        last_name = list("Driver", "familyName"),
+        constructor = list("Constructor", "name"),
+        position = "position",
+        points = "points",
+        status = "status") %>%
+  select(-results) %>%
+  unite(driver, c(first_name, last_name), sep = " ")
+
+# transform column to appropriate data types
+f1_df = f1_df %>%
+  transform(round = as.integer(round)) %>%
+  transform(position = as.integer(position)) %>%
+  transform(points = as.integer(points)) %>%
+  transform(date = as.Date(date)) %>%
+  mutate(position = map2_int(position, status, set_NA_if_not_finished))
+```
+
+
+
+```{r}
+create_named_list <- function(names, values){
+  list(setNames(as.list(values), names))
+}
+
+
+map_func = function(team_name){
+  case_when(
+    team_name == "Ferrari" ~ "red2",
+    team_name == "Mercedes" ~ "grey63",
+    team_name == "Red Bull" ~ "mediumpurple",
+    team_name == "McLaren" ~ "grey82",
+    team_name == "Renault" ~ "gold2",
+    team_name == "Force India" ~ "green2",
+    team_name == "Haas F1 Team" ~ "khaki",
+    team_name == "Sauber" ~ "aquamarine1",
+    team_name == "Toro Rosso" ~ "deeppink3",
+    team_name == "Williams" ~ "wheat2"
+  )
+}
+
+cut_name = function(name, team_points, driver_points, max_points){
+  rel_team_points = team_points / max_points
+  rel_driver_points = driver_points / max_points
+  if (rel_team_points > 0.1 && rel_team_points - rel_driver_points > 0.03 && rel_driver_points > 0.03) {
+    str_to_upper(substr(unlist(strsplit(name, " "))[[2]], 1, 3))
+  }
+  else {
+    ""
+  }
+}
+
+f1_df_plot = f1_df %>% 
+  group_by(driver) %>% arrange(date, .by_group = TRUE) %>% # group by driver
+  mutate(cum_driver_points = cumsum(points)) %>% # cumsum of each driver
+  group_by(name, constructor) %>% arrange(date, .by_group = TRUE) %>% # group by grand prix and constructor
+  mutate(cum_constructor_points = sum(cum_driver_points)) %>% # cumsum of constructor is the sum of the cumsums of the 2 drivers
+  ungroup() %>% mutate(max_team_points = max(cum_constructor_points)) %>%
+  select(name, round, date, driver, constructor, cum_driver_points, cum_constructor_points, max_team_points) %>% # select only important fields
+  arrange(date, constructor, desc(cum_driver_points)) %>% # sort by date, constructor, driver
+  
+  group_by(name, constructor) %>% 
+  mutate(drivers = create_named_list(c("driver_1", "driver_2"), driver), cum_drivers_points = create_named_list(c("cum_driver_1_points", "cum_driver_2_points"), cum_driver_points)) %>%
+  unnest_wider(drivers, simplify = TRUE) %>%
+  unnest_wider(cum_drivers_points, simplify = TRUE) %>%
+
+  select(-c(driver, cum_driver_points)) %>%
+  distinct() %>%
+  
+  arrange(date, desc(cum_constructor_points)) %>%
+  group_by(name) %>% mutate(rank = rank(-cum_constructor_points, ties.method = "first")) %>% ungroup() %>% # create rank for the plot
+  mutate(driver_1 = pmap(list(driver_1, cum_constructor_points, cum_driver_1_points, max_team_points), cut_name)) %>% # map driver_1 name to 3 digits
+  mutate(driver_2 = pmap(list(driver_2, cum_constructor_points, cum_driver_2_points, max_team_points), cut_name)) %>% # map driver_2 name to 3 digits
+  mutate(team_color = map(constructor, map_func)) %>% # map constructor to color
+  arrange(date)
+  
+  
+static_plot = ggplot(f1_df_plot, 
+                    aes(x = rank, group = constructor, fill = team_color)) + 
+
+  geom_tile(aes(y = cum_constructor_points/2, height = cum_constructor_points, width = 0.8, alpha = 0.5)) +
+  geom_text(aes(y = 0, label = paste(constructor, "  "), family = "bookman"), vjust = 0.2, hjust = 1) +
+  geom_text(aes(y = cum_constructor_points, label = cum_constructor_points, family = "Palatino", hjust = -0.1)) +
+
+  geom_tile(aes(y = cum_driver_1_points/2, height = cum_driver_1_points, width = 0.8, alpha = 0.6)) +
+  geom_text(aes(y = cum_driver_1_points, label = driver_1, family = "Palatino", hjust = 1.1, size = 18)) +
+  
+  geom_text(aes(y = cum_driver_1_points, label = driver_2, family = "Palatino", hjust = -0.1, size = 18)) +
+  
+  coord_flip(clip = "off", expand = FALSE) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_x_reverse() +
+  guides(color = FALSE, fill = FALSE) +
+  theme(axis.line = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.position="none",
+        panel.grid.major.x = element_line(size=.1, color="grey" ),
+        panel.grid.minor.x = element_line(size=.1, color="grey" ),
+        plot.title = element_text(family = "bookman", size=20, hjust=0.2, face="bold", colour="grey", vjust=1.7),
+        plot.caption = element_text(size=18, hjust=0.5, face="italic", color="grey"),
+        plot.background=element_blank(),
+        plot.margin = margin(1, 1, 1, 3, "cm")
+  )
+
+animation = static_plot +
+  transition_states(round, transition_length = 0.2, state_length = 0.8, wrap = FALSE) +
+  labs(title = 'Cumulative points until round : {closest_state}',
+       caption  = "Formula 1 - 2018 champion") +
+  enter_fade() +
+  exit_fade()
+
+anim_gif = animate(animation, 60, fps = 2,  duration = 30, width = 1200, height = 1000,
+        renderer = magick_renderer())
+
+anim_save("formula1.gif")
+```
